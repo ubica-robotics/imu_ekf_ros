@@ -1,17 +1,10 @@
 # imu_ekf_ros
-A C++ and python ROS package that fuses the accelerometer and gyroscope of an IMU to estimate attitude.  
-<p align="center">
-	  <img src="/results/screencap.png" />
-</p>
-After catkin_make and compiling the scripts, cd into the launch folder and type:
-roslaunch cpp_ekf.launch for the C++ version (better and more up to date).
-roslaunch ekf.launch for the Python version (probably broken).
+ROS2 Galactic version of a C++ package that fuses the accelerometer and gyroscope of an IMU to estimate attitude.  
+ros2 launch cpp_ekf.launch for the C++ version.
 
 -This node subscribes to sensor_msgs/IMU messages on the topic '/imu/data', containing accelerometer and gyroscope data.  
 
--This node publishes a quaternion to 'AHRS_EKF_quat'.  
-
--To visualize, run rviz, create an Axes and change the reference frame to 'ENU'. Create another Axes and change the reference frame to 'IMU'. 
+-This node publishes a quaternion to the topic '/quat'.  
 
 Wait for 5 seconds for the initialization procedure. Update the following noise terms inside code for your IMU:
 
