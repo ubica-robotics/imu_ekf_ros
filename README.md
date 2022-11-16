@@ -15,3 +15,6 @@ Wait for 5 seconds for the initialization procedure. Update the following noise 
 
 Tested with Xsens MTI-20 and Sensonor STIM300.
 Primary reference is 'Aided Navigation: GPS with High Rate Sensors' by Jay A. Farrell, chapter 10.
+
+NOTE: The package uses Eigen3 library for linear algebra. The latest release of binaries for this library on ubuntu focal is 3.3.7. However, the imu_ekf_ros package breaks with this version because it requires few functions that are only available in later releases for which binaries are not yet available on focal. Therefore, I downloaded the header files from the latest stable release (3.4.0) and placed them in the include folder. 
+It can be found here: http://eigen.tuxfamily.org/index.php?title=Main_Page#Download
