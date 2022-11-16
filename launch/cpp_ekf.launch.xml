@@ -1,0 +1,4 @@
+<launch>
+<node name="init_ekf" pkg="imu_ekf_ros" exec="init_imu_ekf_node"  output="screen" /> 
+<node name="ekf" pkg="imu_ekf_ros" exec="imu_ekf_node"  output="screen" />
+</launch>
