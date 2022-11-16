@@ -1,7 +1,10 @@
 // HJ: August 3, 2020
 // EKF adopted from earlier python code, fuses IMU and encoder data 
 // ***I didn't use typedefs for clarity for readers
-#include "ekf.h"
+#include "ekf.hpp"
+
+using namespace std::placeholders;
+
 
 void IMU_EKF::computeF(const Eigen::Matrix<double,3,1> &f_i, 
 	const Eigen::Matrix<double,3,3> &R_body_to_nav_next, 
@@ -89,7 +92,7 @@ void IMU_EKF::stationaryMeasurementUpdate(const Eigen::Matrix<double,3,3> & R_bo
 // input: a 3D vector in the inertial frame of the rover
 // for testing, using the surveyed x-axis of the robot
 // in reality, the measured sun ray
-void IMU_EKF::sun_sensor_callback(const geometry_msgs::Vector3::ConstPtr& msg)
+void IMU_EKF::sun_sensor_callback(const geometry_msgs::msg::Vector3::SharedPtr msg)
 {
 	std::cout << "Sun sensor update" << std::endl;
 	// input is a 3D sun ray in the inertial frame
@@ -180,15 +183,15 @@ void IMU_EKF::EKF(const Eigen::MatrixXd & H, const Eigen::MatrixXd & R, const Ei
 }
 
 // imu callback
-void IMU_EKF::imu_callback(const sensor_msgs::Imu::ConstPtr& msg)
+void IMU_EKF::imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
 {
 	// Uncomment to time things
 	//m_filter.timer.PrintDt("Ignore"); 
 	//m_filter.timer.PrintDt("IMU"); 
 
 	// IMU data
-	geometry_msgs::Vector3 w = msg->angular_velocity;
-	geometry_msgs::Vector3 f = msg->linear_acceleration;
+	geometry_msgs::msg::Vector3 w = msg->angular_velocity;
+	geometry_msgs::msg::Vector3 f = msg->linear_acceleration;
 	Eigen::Matrix<double,3,1> w_nb(w.x,w.y,w.z);
 	Eigen::Matrix<double,3,1> f_b(f.x,f.y,f.z);
 
@@ -228,7 +231,7 @@ void IMU_EKF::imu_callback(const sensor_msgs::Imu::ConstPtr& msg)
 	Eigen::Matrix<double,3,1> f_i = b_body_to_nav_avg._transformVector(f_b);
 
 	// get acceleration in inertial frame. (acceleration of body wrt inertial frame in inertial frame)
-	Eigen::Matrix<double,3,1> a_i = f_i - m_g_true;
+	//Eigen::Matrix<double,3,1> a_i = f_i - m_g_true;
 
 	// store in state -> this is time propagation step. 
 	m_state << b_next.w(),b_next.x(),b_next.y(),b_next.z(), x_g(0),x_g(1),x_g(2), x_a(0),x_a(1),x_a(2);
@@ -270,132 +273,140 @@ void IMU_EKF::imu_callback(const sensor_msgs::Imu::ConstPtr& msg)
 
 	// Publish TF and orientation
 	Eigen::Quaternion<double> b_next_body_to_nav = b_next.inverse();
-	static tf::TransformBroadcaster br;
-	tf::Transform transform;
-	transform.setOrigin( tf::Vector3(0, 0, 0));
-	tf::Quaternion q(b_next_body_to_nav.x(),b_next_body_to_nav.y(),b_next_body_to_nav.z(),b_next_body_to_nav.w());
+	auto br = std::make_unique<tf2_ros::TransformBroadcaster>(*n);
+	tf2::Transform transform;
+	transform.setOrigin( tf2::Vector3(0, 0, 0));
+	tf2::Quaternion q(b_next_body_to_nav.x(),b_next_body_to_nav.y(),b_next_body_to_nav.z(),b_next_body_to_nav.w());
 	transform.setRotation(q);
-	br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "map", "IMU"));
-	geometry_msgs::Quaternion quat_msg;
+	geometry_msgs::msg::TransformStamped t;
+	t.header.stamp = tf2_ros::toMsg(tf2_ros::fromRclcpp(n->now()));
+	t.header.frame_id = "map";
+	t.child_frame_id = "IMU";
+	t.transform.translation.x = transform.getOrigin().getX();
+	t.transform.translation.y = transform.getOrigin().getY();
+	t.transform.translation.z = transform.getOrigin().getZ();
+	t.transform.rotation = tf2::toMsg(transform.getRotation());
+	br->sendTransform(t);
+	geometry_msgs::msg::Quaternion quat_msg;
 	quat_msg.x = b_next_body_to_nav.x();
 	quat_msg.y = b_next_body_to_nav.y();
 	quat_msg.z = b_next_body_to_nav.z();
 	quat_msg.w = b_next_body_to_nav.w();
-	m_orientation_pub.publish(quat_msg);
+	m_orientation_pub->publish(quat_msg);
 }
 
-void IMU_EKF::initialize_ekf(ros::NodeHandle &n)
+void IMU_EKF::initialize_ekf()
 {
-	ROS_INFO("ekf: waiting for initialization service");
+	RCLCPP_INFO(n->get_logger(), "ekf: waiting for initialization service.");
 
 	// create client for service
-	ros::ServiceClient client = n.serviceClient<imu_ekf_ros::initRequest>("/initialize_ekf");
-
-	// instantiate service class
-	imu_ekf_ros::initRequest srv;
+	auto client = n->create_client<imu_ekf_ros::srv::InitRequest>("/initialize_ekf");
 
 	// call the service
-	if (!client.waitForExistence(ros::Duration(-1)))
-	{
-		ROS_ERROR("ekf: initialize_ekf didn't send data");
-	} else 
-	{
-		ROS_INFO("ekf: connected to initialize service");
-	}
-	if (client.call(srv))
-	{
-		ROS_INFO("ekf: initialize_ekf responded with data.");
+        if (client->wait_for_service()) {
+            RCLCPP_INFO(n->get_logger(), "ekf: connected to initialize service");
+        }
+        else {
+            RCLCPP_ERROR(n->get_logger(), "ekf: initialize_ekf didn't send data");
+        }
+        
+        auto request = std::make_shared<imu_ekf_ros::srv::InitRequest::Request>();
+        auto result = client->async_send_request(request);
 
-		// initial orientation
-		geometry_msgs::Quaternion b = srv.response.init_orientation;
+        if (rclcpp::spin_until_future_complete(n, result) == rclcpp::FutureReturnCode::SUCCESS)
+        {
+            RCLCPP_INFO(n->get_logger(), "ekf: initialize_ekf responded with data.");
+            
+            // initial orientation
+            auto b = result.get()->init_orientation;
 
-		// initial gyro biases
-		Eigen::Vector3d x_g = {srv.response.gyro_bias[0].data, 
-			srv.response.gyro_bias[1].data, 
-			srv.response.gyro_bias[2].data};
+            // initial gyro biases
+            auto g = result.get()->gyro_bias;
+            Eigen::Vector3d x_g = {g[0].data, g[1].data, g[2].data};
+            
+            // filter rate parameters
+            int num_data = ubica_rclcpp_utils::declare_and_get_param(n, "num_data", 125); // num of data points to init orientation
+            int hz = ubica_rclcpp_utils::declare_and_get_param(n, "imu_hz", 125);  // imu freqency
+            m_filter.dt = 1.0/(double)hz;
+            m_filter.num_data = (double)num_data;
+            double T = num_data/hz;  //number of measurements over rate of IMU
+            
+            // initialize noise terms
+            double sigma_xg = ubica_rclcpp_utils::declare_and_get_param(n, "sigma_xg", 0.00000290); // Gyro (rate) random walk
+            double sigma_nug = ubica_rclcpp_utils::declare_and_get_param(n, "sigma_nug", 0.00068585); // rad/s/rt_Hz, Gyro white noise
+            double sigma_xa = ubica_rclcpp_utils::declare_and_get_param(n, "sigma_xa", 0.00001483); // Accel (rate) random walk m/s3 1/sqrt(Hz)
+            double sigma_nua = ubica_rclcpp_utils::declare_and_get_param(n, "sigma_nua", 0.00220313); // accel white noise
+            
+            // noise matrix for IMU (Q)
+            for (int i = 0; i < 3; i++)
+            {
+                m_filter.Q(i,i) = sigma_nua*sigma_nua;
+                m_filter.Q(3+i,3+i) = sigma_xg*sigma_xg;
+                m_filter.Q(6+i,6+i) = sigma_nug*sigma_nug;
+                m_filter.Q(9+i,9+i) = sigma_xa*sigma_xa;
+            }
+            
+            // noise matrix for accelerometer (Ra)
+            m_filter.Ra = Eigen::Matrix<double,3,3>::Identity(3,3)*(sigma_nua*sigma_nua);
+            
+            // gravity vector
+            m_filter.g = ubica_rclcpp_utils::declare_and_get_param(n, "g", 9.80665);
+            
+            // initialize gravity vector
+            m_g_true << 0, 0, m_filter.g;
+            
+            // initialize state: [b, x_a, x_g] = [quaternion, gyro bias, accel bias],  size 10
+            m_state << b.w,b.x,b.y,b.z,x_g[0],x_g[1],x_g[2], 0,0,0;
+            
+            // initialize covariance
+            m_cov.block<2,2>(0,0) = (sigma_nua/m_filter.g)*(sigma_nua/m_filter.g)/T*Eigen::Matrix<double,2,2>::Identity();
+            m_cov(2,2) = 1000*PI/180.0; // yaw has large uncertainty initially
+            m_cov.block<3,3>(3,3) = (sigma_nug)*(sigma_nug)/T*Eigen::Matrix<double,3,3>::Identity();
+            
+            // TODO: finish this part
+            //m_cov(0,7) =  m_cov[0,0]*m_cov[7,7]
+            //m_cov.block
+            //m_cov[0:2,7:9] = np.diag([math.sqrt(cov[0,0]*cov[7,7]),math.sqrt(cov[1,1]*cov[8,8])]) # absolutely no idea
+            //m_cov[6:,0:3] = np.transpose(cov[0:3,6:])
+            
+        } else {
+            RCLCPP_ERROR(n->get_logger(), "ekf: Failed to call service initialize_ekf.");
+            rclcpp::shutdown();
+        }
 
-		// filter rate parameters
-		int num_data = 0; // number of data points used to initialize orientation
-		int hz = 0; // imu freqency
-		n.param("num_data",num_data,125);
-		n.param("imu_hz",hz,125);
-		m_filter.dt = 1.0/(double)hz;
-		m_filter.num_data = (double)num_data;
-		double T = num_data/hz;  //number of measurements over rate of IMU
-
-		// initialize noise terms
-		double sigma_xg, sigma_nug, sigma_xa, sigma_nua;
-		n.param<double>("sigma_xg",sigma_xg,0.00000290); // Gyro (rate) random walk
-		n.param<double>("sigma_nug",sigma_nug,0.00068585); // rad/s/rt_Hz, Gyro white noise
-		n.param<double>("sigma_xa",sigma_xa,0.00001483);  // Accel (rate) random walk m/s3 1/sqrt(Hz)
-		n.param<double>("sigma_nua",sigma_nua,0.00220313); // accel white noise
-
-		// noise matrix for IMU (Q)
-		for (int i = 0; i < 3; i++)
-		{
-			m_filter.Q(i,i) = sigma_nua*sigma_nua;
-			m_filter.Q(3+i,3+i) = sigma_xg*sigma_xg;
-			m_filter.Q(6+i,6+i) = sigma_nug*sigma_nug;
-			m_filter.Q(9+i,9+i) = sigma_xa*sigma_xa;
-		}
-
-		// noise matrix for accelerometer (Ra)
-		m_filter.Ra = Eigen::Matrix<double,3,3>::Identity(3,3)*(sigma_nua*sigma_nua);
-
-		// gravity vector
-		n.param<double>("g",m_filter.g,9.80665);
-
-		// initialize gravity vector
-		m_g_true << 0, 0, m_filter.g;
-
-		// initialize state: [b, x_a, x_g] = [quaternion, gyro bias, accel bias],  size 10
-		m_state << b.w,b.x,b.y,b.z,x_g[0],x_g[1],x_g[2], 0,0,0;
-
-		// initialize covariance
-		m_cov.block<2,2>(0,0) = (sigma_nua/m_filter.g)*(sigma_nua/m_filter.g)/T*Eigen::Matrix<double,2,2>::Identity();
-		m_cov(2,2) = 1000*PI/180.0; // yaw has large uncertainty initially
-		m_cov.block<3,3>(3,3) = (sigma_nug)*(sigma_nug)/T*Eigen::Matrix<double,3,3>::Identity();
-
-		// TODO: finish this part
-		//m_cov(0,7) =  m_cov[0,0]*m_cov[7,7]
-		//m_cov.block
-		//m_cov[0:2,7:9] = np.diag([math.sqrt(cov[0,0]*cov[7,7]),math.sqrt(cov[1,1]*cov[8,8])]) # absolutely no idea
-		//m_cov[6:,0:3] = np.transpose(cov[0:3,6:])
-	}
-	else
-	{
-		ROS_ERROR("ekf: Failed to call service initialize_ekf.");
-		ros::shutdown();
-	}
 }
 
 
-IMU_EKF::IMU_EKF(ros::NodeHandle & n)
+IMU_EKF::IMU_EKF(rclcpp::Node::SharedPtr nh)
 {
+        n = nh;
+
 	// imu callback
-	m_imu_subscriber =  n.subscribe("/imu/data", 1000, &IMU_EKF::imu_callback, this);
+	m_imu_subscriber = n->create_subscription<sensor_msgs::msg::Imu>("/imu/data", 1000, std::bind(&IMU_EKF::imu_callback, this, _1));
 
 	// sun sensor callback
-	m_sun_sensor_subscriber = n.subscribe("/sun_sensor", 1, &IMU_EKF::sun_sensor_callback, this);
+	m_sun_sensor_subscriber = n->create_subscription<geometry_msgs::msg::Vector3>("/sun_sensor", 1, std::bind(&IMU_EKF::sun_sensor_callback, this, _1));
 
 	// orientation publisher
-	m_orientation_pub = n.advertise<geometry_msgs::Quaternion>("/quat", 0, this);
+	m_orientation_pub = n->create_publisher<geometry_msgs::msg::Quaternion>("/quat", 0);
 
 	// initialize ekf
-	initialize_ekf(n);
+	initialize_ekf();
 }
 
 int main(int argc, char **argv)
 {
-	ROS_INFO("EKF node started.");
+	rclcpp::init(argc, argv);
+	
+	auto nh = rclcpp::Node::make_shared("imu_ekf_node");
 
-	ros::init(argc, argv, "imu_ekf_node");
+	RCLCPP_INFO(nh->get_logger(), "EKF node started.");
 
-	ros::NodeHandle n;
-
-	IMU_EKF imu_ekf(n);
-
-	ros::spin();
+	IMU_EKF imu_ekf(nh);
+	
+	while (rclcpp::ok()){
+	    rclcpp::spin(nh);
+	}
 
 	return 0;
 }
